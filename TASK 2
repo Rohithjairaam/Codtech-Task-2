@@ -1,0 +1,111 @@
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <thread>
+#include <mutex>
+#include <zlib.h>
+
+std::mutex fileMutex;
+
+// Function to compress a chunk of data
+void compressChunk(const std::vector<char>& input, std::vector<char>& output, size_t chunkIndex) {
+    uLongf compressedSize = compressBound(input.size());
+    output.resize(compressedSize);
+
+    int res = compress(reinterpret_cast<Bytef*>(&output[0]), &compressedSize,
+                       reinterpret_cast<const Bytef*>(&input[0]), input.size());
+
+    if (res != Z_OK) {
+        std::cerr << "Error compressing chunk " << chunkIndex << "\n";
+        return;
+    }
+
+    output.resize(compressedSize); // Shrink to actual compressed size
+}
+
+// Function to decompress a chunk of data
+void decompressChunk(const std::vector<char>& input, std::vector<char>& output, size_t chunkIndex) {
+    uLongf decompressedSize = input.size() * 4; // Assume maximum decompression ratio
+    output.resize(decompressedSize);
+
+    int res = uncompress(reinterpret_cast<Bytef*>(&output[0]), &decompressedSize,
+                         reinterpret_cast<const Bytef*>(&input[0]), input.size());
+
+    if (res != Z_OK) {
+        std::cerr << "Error decompressing chunk " << chunkIndex << "\n";
+        return;
+    }
+
+    output.resize(decompressedSize); // Shrink to actual decompressed size
+}
+
+// Process file using multithreading
+void processFile(const std::string& inputFile, const std::string& outputFile, bool compress) {
+    const size_t chunkSize = 1024 * 1024; // 1 MB chunks
+    std::ifstream input(inputFile, std::ios::binary);
+    std::ofstream output(outputFile, std::ios::binary);
+
+    if (!input.is_open() || !output.is_open()) {
+        std::cerr << "Error opening files.\n";
+        return;
+    }
+
+    size_t chunkIndex = 0;
+    std::vector<std::thread> threads;
+
+    while (true) {
+        std::vector<char> buffer(chunkSize);
+        input.read(&buffer[0], chunkSize);
+        size_t bytesRead = input.gcount();
+
+        if (bytesRead == 0) break;
+
+        buffer.resize(bytesRead);
+        threads.emplace_back([&, chunkIndex, buffer]() {
+            std::vector<char> processedChunk;
+
+            if (compress) {
+                compressChunk(buffer, processedChunk, chunkIndex);
+            } else {
+                decompressChunk(buffer, processedChunk, chunkIndex);
+            }
+
+            std::lock_guard<std::mutex> lock(fileMutex);
+            output.write(&processedChunk[0], processedChunk.size());
+        });
+
+        chunkIndex++;
+    }
+
+    // Join threads
+    for (auto& thread : threads) {
+        if (thread.joinable()) thread.join();
+    }
+
+    input.close();
+    output.close();
+
+    std::cout << (compress ? "Compression" : "Decompression") << " completed successfully!\n";
+}
+
+int main(int argc, char* argv[]) {
+    if (argc != 4) {
+        std::cerr << "Usage: " << argv[0] << " <compress|decompress> <input_file> <output_file>\n";
+        return 1;
+    }
+
+    std::string mode = argv[1];
+    std::string inputFile = argv[2];
+    std::string outputFile = argv[3];
+
+    if (mode == "compress") {
+        processFile(inputFile, outputFile, true);
+    } else if (mode == "decompress") {
+        processFile(inputFile, outputFile, false);
+    } else {
+        std::cerr << "Invalid mode. Use 'compress' or 'decompress'.\n";
+        return 1;
+    }
+
+    return 0;
+}
